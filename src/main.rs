@@ -40,7 +40,7 @@ fn main() -> io::Result<()> {
 						let datai = 4 + iph.slice().len() + tcph.slice().len();
 						connections.entry(Quad {
 							src: (src, tcph.source_port()),
-        			dst: (dst, tcph.destination_port()),
+							dst: (dst, tcph.destination_port()),
 						}).or_default().on_packet(iph, tcph, &buff[datai..nbytes]);
 					},
 					Err(e) => {
