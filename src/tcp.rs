@@ -128,6 +128,10 @@ impl Connection {
 			],
 		);
 		
+		syn_ack.checksum = syn_ack
+			.calc_checksum_ipv4(&ip, &[])
+			.expect("fail to compute checksum");
+
 		// write out the headers
 		let unwritten = {
 			let mut unwritten = &mut buff[..];
