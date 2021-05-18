@@ -10,7 +10,7 @@ struct Quad {
 }
 
 fn main() -> io::Result<()> {
-	let mut connections: HashMap<Quad, tcp::State> = Default::default();
+	let mut connections: HashMap<Quad, tcp::Connection> = Default::default();
 	let mut nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
 	let mut buff = [0u8; 1504];
 
@@ -35,13 +35,23 @@ fn main() -> io::Result<()> {
 
 				match etherparse::TcpHeaderSlice::from_slice(&buff[4+iph.slice().len()..nbytes]) {
 					Ok(tcph) => { // tcp header
+						use std::collections::hash_map::Entry;
 						let datai = 4 + iph.slice().len() + tcph.slice().len();
-						connections.entry(Quad {
+						
+						match connections.entry(Quad {
 							src: (src, tcph.source_port()),
 							dst: (dst, tcph.destination_port()),
-						})
-						.or_default()
-						.on_packet(&mut nic, iph, tcph, &buff[datai..nbytes])?;
+						}) {
+							Entry::Occupied(mut c) => {
+								c.get_mut().on_packet(&mut nic, iph, tcph, &buff[datai..nbytes])?;
+							},
+							Entry::Vacant(e) => {
+								if let Some(c) = tcp::Connection::accept(&mut nic, iph, tcph, &buff[datai..nbytes])? {
+									e.insert(c);
+								}
+							}
+						}
+						
 					},
 					Err(e) => {
 						eprintln!("ignoring weird package {:?}", e);
