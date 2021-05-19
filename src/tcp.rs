@@ -1,4 +1,4 @@
-use std::{any::type_name, io};
+use std::{cmp::min, io};
 
 pub enum State {
 	// Listen,
@@ -6,11 +6,21 @@ pub enum State {
 	Estab,
 }
 
+impl State {
+	fn is_synchronized(&self) -> bool {
+		match *self {
+			State::SynRcvd => false,
+			State::Estab => true
+		}
+	}
+}
+
 pub struct Connection {
 	state: State,
 	send: SendSequenceSpace,
 	recv: RecvSequenceSpace,
 	ip: etherparse::Ipv4Header,
+	tcp: etherparse::TcpHeader,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2 F4)
@@ -80,12 +90,13 @@ impl Connection {
 		}
 
 		let iss = 0;
+		let wnd = 10;
 		let mut c = Connection {
 			state: State::SynRcvd,
 			send: SendSequenceSpace {
 				iss,
-				una: iss + 1,
-				nxt: iss + 1,
+				una: iss,
+				nxt: iss,
 				wnd: 10,
 				up: false,
 				wl1: 0,
@@ -114,33 +125,57 @@ impl Connection {
 					iph.source()[3],
 				],
 			),
+			tcp: etherparse::TcpHeader::new(
+				tcph.destination_port(),
+				tcph.source_port(),
+				iss,
+				wnd,
+			),
 		};
 
-		// need to start establishing a connection
-		let mut syn_ack = etherparse::TcpHeader::new(
-			tcph.destination_port(),
-			tcph.source_port(),
-			c.send.iss,
-			c.send.wnd,
-		);
-
-		c.ip.set_payload_len(syn_ack.header_len() as usize + 0)
-				.expect("error setting ip payload len");
-
-		syn_ack.acknowledgment_number = c.recv.nxt;
-		syn_ack.syn = true;
-		syn_ack.ack = true;
-
-		// write out the headers
-		let unwritten = {
-			let mut unwritten = &mut buff[..];
-			c.ip.write(&mut unwritten).expect("error writen ip header");
-			syn_ack.write(&mut unwritten).expect("error writen syn");
-			unwritten.len()
-		};
-
-		nic.send(&buff[..unwritten])?;
+		c.tcp.syn = true;
+		c.tcp.ack = true;
+		c.write(nic, &[])?;
 		Ok(Some(c))
+	}
+
+	fn write(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> io::Result<usize> {
+		use std::io::Write;
+
+		let mut buff = [0u8; 1500];
+		self.tcp.sequence_number = self.send.nxt;
+		self.tcp.acknowledgment_number = self.recv.nxt;
+		let size = min(buff.len(), self.tcp.header_len() as usize + self.ip.header_len() + payload.len());
+
+		self.ip.set_payload_len(size).expect("errror setting ip payload");
+
+		let mut unwritten = &mut buff[..];
+		self.ip.write(&mut unwritten).expect("error writen ip header");
+		self.tcp.write(&mut unwritten).expect("error writen syn");
+		let payload_bytes = unwritten.write(payload)?;
+		let unwritten = unwritten.len();
+
+		self.send.nxt = self.send.nxt.wrapping_add(payload_bytes as u32);
+		if self.tcp.syn {
+			self.send.nxt = self.send.nxt.wrapping_add(1);
+			self.tcp.syn = false;
+		}
+
+		if self.tcp.fin {
+			self.send.nxt = self.send.nxt.wrapping_add(1);
+			self.tcp.fin = false; 
+		}
+
+		nic.send(&buff[..buff.len() - unwritten])?;
+		Ok(payload_bytes)
+	}
+
+	pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+		self.tcp.rst = true;
+		self.tcp.sequence_number = 0;
+		self.tcp.acknowledgment_number = 0;
+		self.write(nic, &[])?;
+		Ok(())
 	}
 
 	pub fn on_packet<'a>(
@@ -153,14 +188,46 @@ impl Connection {
 
 		let ackn = tcph.acknowledgment_number();
 		if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-			return Ok(())
+			if !self.state.is_synchronized() {
+				self.send_rst(nic);
+			};
+			return Ok(());
 		}
 
 		// valid segment check
+		
+		let seqn = tcph.sequence_number();
+		let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+		let mut slen = data.len() as u32;
+		if tcph.fin() { slen += 1 }
+		if tcph.syn() { slen += 1 }
+
+		if slen == 0 && !tcph.syn() && !tcph.fin() {
+			// zero length segment has separate rules for acceptance
+			if self.recv.wnd == 0 {
+				if seqn != self.recv.nxt {
+					return Ok(());
+				}
+			} else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
+					return Ok(());
+			}
+		} else {
+			if self.recv.wnd == 0 {
+				return Ok(());
+			} else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1 , wend) {
+					return Ok(());
+			}
+		}
 
 		match self.state {
 			State::SynRcvd => {
 				// expect to get an ACK from the SYN
+				if !tcph.ack() {
+					return Ok(());
+				}
+
+				self.state = State::Estab;
+
 
 			}
 			State::Estab => {
