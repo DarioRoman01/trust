@@ -4,13 +4,17 @@ pub enum State {
 	// Listen,
 	SynRcvd,
 	Estab,
+	FinW1, // fin wait 1 state
+	Finw2, // fin wait 2 state
+	TimeWait,
+	// CloseW, close wait state
 }
 
 impl State {
 	fn is_synchronized(&self) -> bool {
 		match *self {
 			State::SynRcvd => false,
-			State::Estab => true
+			State::Estab | State::FinW1 | State::Finw2 | State::TimeWait => true,
 		}
 	}
 }
@@ -185,17 +189,7 @@ impl Connection {
 		tcph: etherparse::TcpHeaderSlice<'a>,
 		data: &'a [u8],
 	) -> io::Result<()> {
-
-		let ackn = tcph.acknowledgment_number();
-		if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-			if !self.state.is_synchronized() {
-				self.send_rst(nic)?;
-			}
-			return Ok(());
-		}
-
 		// valid segment check
-		
 		let seqn = tcph.sequence_number();
 		let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
 		let mut slen = data.len() as u32;
@@ -214,26 +208,69 @@ impl Connection {
 		} else {
 			if self.recv.wnd == 0 {
 				return Ok(());
-			} else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1 , wend) {
+			} else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn.wrapping_add(slen - 1), wend) {
 					return Ok(());
 			}
 		}
-
-		match self.state {
-			State::SynRcvd => {
-				// expect to get an ACK from the SYN
-				if !tcph.ack() {
-					return Ok(());
-				}
-
+		self.recv.nxt = seqn.wrapping_add(slen - 1);
+		
+		let ackn = tcph.acknowledgment_number();
+		if let State::SynRcvd = self.state {
+			if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
 				self.state = State::Estab;
+			} else {
+				// TODO: RST: <SEQ=SEG.ACK><CTL=RST
+			}
+		}
 
+		if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+			return Ok(());
+		}
+		self.send.una = ackn;
+
+		if let State::Estab = self.state {
+			if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
+				return Ok(());
+			}
+			self.send.una = ackn;
+			assert!(data.is_empty());
+
+			// finish connection
+			self.tcp.fin = true;
+			self.write(nic, &[])?;
+			self.state = State::FinW1;
+		}
+
+		if let State::FinW1 = self.state {
+			if self.send.una == self.send.iss + 2 {
+				// the FIN has ben ACKed
+				self.state = State::Finw2
 
 			}
-			State::Estab => {
+		}
+
+		if tcph.fin() {
+			match self.state {
+				State::Finw2 => {
+					// done with the connection
+					self.tcp.fin = true;
+					self.write(nic, &[])?;
+					self.state = State::TimeWait;
+				},
+				_ => unimplemented!(),
+			}
+		}
+
+		if let State::Finw2 = self.state {
+			if !tcph.fin() || !data.is_empty() {
 				unimplemented!();
 			}
+
+			self.tcp.fin = false;
+			self.write(nic, &[])?;
+			self.state = State::TimeWait;
 		}
+
 		Ok(())
 	}
 }
