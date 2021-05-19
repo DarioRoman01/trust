@@ -84,7 +84,7 @@ impl Connection {
 		_data: &'a [u8],
 	) -> io::Result<Option<Self>> {
 		
-		let mut buff = [0u8; 1500];
+		// let buff = [0u8; 1500];
 		if !tcph.syn() {
 				return Ok(None);
 		}
@@ -189,8 +189,8 @@ impl Connection {
 		let ackn = tcph.acknowledgment_number();
 		if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
 			if !self.state.is_synchronized() {
-				self.send_rst(nic);
-			};
+				self.send_rst(nic)?;
+			}
 			return Ok(());
 		}
 
