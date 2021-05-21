@@ -99,7 +99,7 @@ impl Connection {
             send: SendSequenceSpace {
                 iss,
                 una: iss,
-                nxt: iss,
+                nxt: iss + 1,
                 wnd: 10,
                 up: false,
                 wl1: 0,
@@ -156,6 +156,7 @@ impl Connection {
         self.ip
             .write(&mut unwritten)
             .expect("error writen ip header");
+
         self.tcp.write(&mut unwritten).expect("error writen syn");
         let payload_bytes = unwritten.write(payload)?;
         let unwritten = unwritten.len();
