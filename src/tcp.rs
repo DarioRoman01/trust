@@ -99,7 +99,7 @@ impl Connection {
             send: SendSequenceSpace {
                 iss,
                 una: iss,
-                nxt: iss + 1,
+                nxt: iss,
                 wnd: 10,
                 up: false,
                 wl1: 0,
@@ -143,6 +143,7 @@ impl Connection {
         let mut buff = [0u8; 1500];
         self.tcp.sequence_number = self.send.nxt;
         self.tcp.acknowledgment_number = self.recv.nxt;
+
         let size = min(
             buff.len(),
             self.tcp.header_len() as usize + self.ip.header_len() + payload.len(),
@@ -151,6 +152,11 @@ impl Connection {
         self.ip
             .set_payload_len(size - self.ip.header_len() as usize)
             .expect("errror setting ip payload");
+
+        self.tcp.checksum = self
+            .tcp
+            .calc_checksum_ipv4(&self.ip, &[])
+            .expect("Failed to comput checksum");
 
         let mut unwritten = &mut buff[..];
         self.ip
@@ -187,7 +193,7 @@ impl Connection {
     pub fn on_packet<'a>(
         &mut self,
         nic: &mut tun_tap::Iface,
-        iph: etherparse::Ipv4HeaderSlice<'a>,
+        _iph: etherparse::Ipv4HeaderSlice<'a>,
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<()> {
@@ -242,6 +248,7 @@ impl Connection {
 
         self.recv.nxt = seqn.wrapping_add(slen - 1);
         let ackn = tcph.acknowledgment_number();
+
         if let State::SynRcvd = self.state {
             if !is_between_wrapped(
                 self.send.una.wrapping_sub(1),
@@ -254,11 +261,6 @@ impl Connection {
             }
         }
 
-        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-            return Ok(());
-        }
-        self.send.una = ackn;
-
         if let State::Estab = self.state {
             if !is_between_wrapped(
                 self.send.una.wrapping_sub(1),
@@ -267,6 +269,7 @@ impl Connection {
             ) {
                 return Ok(());
             }
+
             self.send.una = ackn;
             assert!(data.is_empty());
 
