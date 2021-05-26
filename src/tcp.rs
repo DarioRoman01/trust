@@ -261,7 +261,7 @@ impl Connection {
             }
         }
 
-        if let State::Estab = self.state {
+        if let State::Estab | State::FinW1 | State::Finw2 = self.state {
             if !is_between_wrapped(
                 self.send.una.wrapping_sub(1),
                 ackn,
@@ -273,10 +273,13 @@ impl Connection {
             self.send.una = ackn;
             assert!(data.is_empty());
 
-            // finish connection
-            self.tcp.fin = true;
-            self.write(nic, &[])?;
-            self.state = State::FinW1;
+            
+            if let Steate::Estab = self.state {
+                // finish connection
+                self.tcp.fin = true;
+                self.write(nic, &[])?;
+                self.state = State::FinW1;
+            }
         }
 
         if let State::FinW1 = self.state {
