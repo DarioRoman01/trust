@@ -2,7 +2,7 @@
 cargo b --release
 ext=$?
 echo "$ext"
-if [[ $ext -ne 0]]; then
+if [[ $ext -ne 0]] then
         exit $ext
 fi
 sudo setcap cap_net_admin=eip $CARGO_TARGET_DIR/release/trust

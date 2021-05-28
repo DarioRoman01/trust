@@ -274,7 +274,7 @@ impl Connection {
             assert!(data.is_empty());
 
             
-            if let Steate::Estab = self.state {
+            if let State::Estab = self.state {
                 // finish connection
                 self.tcp.fin = true;
                 self.write(nic, &[])?;
@@ -305,29 +305,20 @@ impl Connection {
     }
 }
 
+fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
+    // From RFC1323:
+    //    TCP determines if a data segment is "old" or "new" by testing
+    //    whether its sequence number is within 2 ** 31 bytes of the left edge
+    //    if the window, and if it is not, discarding the data as "old". To
+    //    insure that new data is never mistakenly considered old and viceversa
+    //    the left edge of the sender's widnow has to be the most 2 ** 31 away
+    //    from the rigth edge reciviers window.
+    lhs.wrapping_sub(rhs) > 2 ^ 31
+}
+
 /// acceptable ACK check
 /// SND.UNA < SEG.ACK =< SND.NEXT
 ///  start  <    x    =<   end
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
-    use std::cmp::Ordering;
-
-    match start.cmp(&x) {
-        Ordering::Equal => return false,
-
-        Ordering::Less => {
-            if end >= start && end <= x {
-                return false;
-            } else {
-                return true;
-            }
-        }
-
-        Ordering::Greater => {
-            if end < start && end > x {
-                return true;
-            } else {
-                return false;
-            }
-        }
-    }
+    wrapping_lt(start, x) && wrapping_lt(x, end)
 }
