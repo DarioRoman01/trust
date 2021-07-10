@@ -57,23 +57,52 @@ impl Interface {
     }
 
     pub fn bind(&mut self, port: u16) -> io::Result<TcpListener> {
-        unimplemented!()
+        let (ack, rx) = mpsc::channel();
+        self.tx.send(InterfaceRequest::Bind {
+            port,
+            ack
+        });
+        rx.recv().unwrap();
+        Ok(TcpListener{tx: self.tx.clone()})
     }
 }
 
 pub struct TcpStream(InterfaceHandle);
 
 impl Read for TcpStream {
-    fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> { unimplemented!() }
+    fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> { 
+        let (read, rx) = mpsc::channel();
+        self.tx.send(InterfaceRequest::Read {
+            max_len: buff.len(),
+            read
+        });
+
+        let bytes = rx.recv().unwrap();
+        assert!(bytes.len() <= buff.len());
+        buff.copy_from_slice(&bytes[..]);
+        Ok(bytes.len())
+    }
 }
 
 impl Write for TcpStream {
-    fn write(&mut self, buff: &[u8]) -> io::Result<usize> { unimplemented!() }
+    fn write(&mut self, buff: &[u8]) -> io::Result<usize> { 
+        let (ack, rx) = mpsc::channel();
+        self.tx.send(InterfaceRequest::Write {
+            bytes: Vec::from(buff),
+            ack
+        });
+
+        let n = rx.recv().unwrap();
+        assert!(n <= buff.len());
+        Ok(n)
+    }
 
     fn flush(&mut self) -> io::Result<()> { unimplemented!() }
 }
 
-pub struct TcpListener {}
+pub struct TcpListener {
+    tx: InterfaceHandle
+}
 
 impl TcpListener {
     pub fn accept(&mut self) -> io::Result<TcpStream> { unimplemented!() }
