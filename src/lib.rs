@@ -1,25 +1,41 @@
 use std::io;
 use std::io::prelude::*;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::mpsc;
 use std::thread;
+
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+struct Quad {
+	src: (Ipv4Addr, u16),
+	dst: (Ipv4Addr, u16),
+}
 
 type InterfaceHandle = mpsc::Sender<InterfaceRequest>;
 
 enum InterfaceRequest {
     Write{
+        quad: Quad,
         bytes: Vec<u8>, 
         ack: mpsc::Sender<usize>
     },
-    Flush{ack: mpsc::Sender<()>},
+    Flush{
+        quad: Quad,
+        ack: mpsc::Sender<()>
+    },
     Bind{
         port: u16, 
         ack: mpsc::Sender<Vec<u8>>
     },
     Unbind,
     Read{
+        quad: Quad,
         max_len: usize, 
         read: mpsc::Sender<Vec<u8>>
+    },
+    Accept{
+        port: u16,
+        read: mpsc::Sender<Quad>
     },
 }
 
@@ -35,7 +51,7 @@ struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    fn run_on(self, rx: InterfaceHandle) {
+    fn run_on(self, rx: mpsc::Sender<InterfaceRequest>) {
         // main event loop for packet processing
         for req in rx {
 
@@ -63,16 +79,17 @@ impl Interface {
             ack
         });
         rx.recv().unwrap();
-        Ok(TcpListener{tx: self.tx.clone()})
+        Ok(TcpListener(port, self.tx.clone()))
     }
 }
 
-pub struct TcpStream(InterfaceHandle);
+pub struct TcpStream(Quad, InterfaceHandle);
 
 impl Read for TcpStream {
     fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> { 
         let (read, rx) = mpsc::channel();
-        self.tx.send(InterfaceRequest::Read {
+        self.1.send(InterfaceRequest::Read {
+            quad: self.0,
             max_len: buff.len(),
             read
         });
@@ -87,7 +104,8 @@ impl Read for TcpStream {
 impl Write for TcpStream {
     fn write(&mut self, buff: &[u8]) -> io::Result<usize> { 
         let (ack, rx) = mpsc::channel();
-        self.tx.send(InterfaceRequest::Write {
+        self.1.send(InterfaceRequest::Write {
+            quad: self.0.clone(),
             bytes: Vec::from(buff),
             ack
         });
@@ -97,13 +115,28 @@ impl Write for TcpStream {
         Ok(n)
     }
 
-    fn flush(&mut self) -> io::Result<()> { unimplemented!() }
+    fn flush(&mut self) -> io::Result<()> { 
+        let (ack, rx) = mpsc::channel();
+        self.1.send(InterfaceRequest::Flush {
+            quad: self.0,
+            ack
+        });
+        rx.recv().unwrap();
+        Ok(())
+    }
 }
 
-pub struct TcpListener {
-    tx: InterfaceHandle
-}
+pub struct TcpListener(u16 ,InterfaceHandle);
 
 impl TcpListener {
-    pub fn accept(&mut self) -> io::Result<TcpStream> { unimplemented!() }
+    pub fn accept(&mut self) -> io::Result<TcpStream> { 
+        let (ack, rx) = mpsc::channel();
+        self.1.send(InterfaceRequest::Accept {
+            port: self.0,
+            read: ack,
+        });
+
+        let quad = rx.recv().unwrap();
+        Ok(TcpStream(quad, self.1.clone()))
+    }
 }
