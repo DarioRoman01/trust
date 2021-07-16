@@ -1,9 +1,10 @@
 use std::io;
 use std::io::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+mod tcp;
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 struct Quad {
@@ -11,75 +12,49 @@ struct Quad {
 	dst: (Ipv4Addr, u16),
 }
 
-type InterfaceHandle = mpsc::Sender<InterfaceRequest>;
-
-enum InterfaceRequest {
-    Write{
-        quad: Quad,
-        bytes: Vec<u8>, 
-        ack: mpsc::Sender<usize>
-    },
-    Flush{
-        quad: Quad,
-        ack: mpsc::Sender<()>
-    },
-    Bind{
-        port: u16, 
-        ack: mpsc::Sender<Vec<u8>>
-    },
-    Unbind,
-    Read{
-        quad: Quad,
-        max_len: usize, 
-        read: mpsc::Sender<Vec<u8>>
-    },
-    Accept{
-        port: u16,
-        read: mpsc::Sender<Quad>
-    },
-}
+type InterfaceHandle = Arc<Mutex<ConnectionManager>>;
 
 pub struct Interface {
-    tx: InterfaceHandle,
+    ih: InterfaceHandle,
     jh: thread::JoinHandle<()>
 }
 
+#[derive(Default)]
 struct ConnectionManager {
     connections: HashMap<Quad, tcp::Connection>,
-    nic: tun_tap::Iface,
-    buff: [u8; 1504],
-}
-
-impl ConnectionManager {
-    fn run_on(self, rx: mpsc::Sender<InterfaceRequest>) {
-        // main event loop for packet processing
-        for req in rx {
-
-        }
-    }
+    pending: HashMap<u16, VecDeque<Quad>>
 }
 
 impl Interface {
     pub fn new() -> io::Result<Self> {
-        let cm = ConnectionManager {
-            connections: Default::default(), 
-            nic: tun_tap::Iface::without_packet_info("tun0", tun_tap::Mode::Tun)?, 
-            buff: [0u8; 1504],
-        };
+        let nic = tun_tap::Iface::without_packet_info("tun0", tun_tap::Mode::Tun)?;
+        let cm: InterfaceHandle = Arc::default();
 
-        let (tx, rx) = mpsc::channel();
-        let jh = thread::spawn(move || cm.run_on(rx));
-        Ok(Interface { tx, jh})
+        let jh = {
+            let cm = cm.clone();
+            thread::spawn(move || {
+                let nic = nic;
+                let cm = cm;
+                let buf = [0u8; 1504]; 
+            })
+        };
+        Ok(Interface { ih: cm, jh})
     }
 
     pub fn bind(&mut self, port: u16) -> io::Result<TcpListener> {
-        let (ack, rx) = mpsc::channel();
-        self.tx.send(InterfaceRequest::Bind {
-            port,
-            ack
-        });
-        rx.recv().unwrap();
-        Ok(TcpListener(port, self.tx.clone()))
+        use std::collections::hash_map::Entry;
+        let cm = self.ih.lock().unwrap();
+
+        match cm.pending.entry(port) {
+            Entry::Vacant(v) => v.insert(VecDeque::new()),
+            Entry::Occupied(_) => {
+                return Err(io::Error::new(io::ErrorKind::AddrInUse, "port already bound"))
+            },
+        };
+
+        // TODO: something to start accepting SYN packets on `PORT`
+        drop(cm);
+        Ok(TcpListener(port, self.ih.clone()))
     }
 }
 
@@ -87,17 +62,21 @@ pub struct TcpStream(Quad, InterfaceHandle);
 
 impl Read for TcpStream {
     fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> { 
-        let (read, rx) = mpsc::channel();
-        self.1.send(InterfaceRequest::Read {
-            quad: self.0,
-            max_len: buff.len(),
-            read
-        });
+        let cm = self.1.lock().unwrap();
+        let c = cm.connections.get_mut(&self.0).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted, 
+                "stram was terminated unexpectedly"
+            )
+        })?;
 
-        let bytes = rx.recv().unwrap();
-        assert!(bytes.len() <= buff.len());
-        buff.copy_from_slice(&bytes[..]);
-        Ok(bytes.len())
+        if c.incoming.is_empty() {
+            // TODO: block
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted, 
+                "there is no bytes to read"
+            ));
+        }   
     }
 }
 
@@ -130,13 +109,12 @@ pub struct TcpListener(u16 ,InterfaceHandle);
 
 impl TcpListener {
     pub fn accept(&mut self) -> io::Result<TcpStream> { 
-        let (ack, rx) = mpsc::channel();
-        self.1.send(InterfaceRequest::Accept {
-            port: self.0,
-            read: ack,
-        });
-
-        let quad = rx.recv().unwrap();
-        Ok(TcpStream(quad, self.1.clone()))
+        let cm = self.1.lock().unwrap();
+        if let Some(quad) = cm.pending.get_mut(&self.0).expect("port closed while liststener still active").pop_front() {
+            return Ok(TcpStream(quad, self.1.clone()));
+        } else {
+            // TODO: block
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "no connection to accpet"));
+        }
     }
 }

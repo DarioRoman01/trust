@@ -1,4 +1,4 @@
-use std::{cmp::min, io};
+use std::{cmp::min, collections::VecDeque, io};
 
 pub enum State {
     // Listen,
@@ -25,6 +25,8 @@ pub struct Connection {
     recv: RecvSequenceSpace,
     ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
+    pub incoming: VecDeque<u8>,
+    unacked: VecDeque<u8>,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2 F4)
@@ -129,6 +131,8 @@ impl Connection {
                 ],
             ),
             tcp: etherparse::TcpHeader::new(tcph.destination_port(), tcph.source_port(), iss, wnd),
+            incoming: VecDeque::new(),
+            unacked: VecDeque::new(),
         };
 
         c.tcp.syn = true;
