@@ -131,8 +131,8 @@ impl Connection {
                 ],
             ),
             tcp: etherparse::TcpHeader::new(tcph.destination_port(), tcph.source_port(), iss, wnd),
-            incoming: VecDeque::new(),
-            unacked: VecDeque::new(),
+            incoming: Default::default(),
+            unacked: Default::default(),
         };
 
         c.tcp.syn = true;

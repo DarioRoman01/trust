@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::prelude::*;
 use std::net::{Ipv4Addr, Shutdown};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 mod tcp;
 
@@ -46,7 +46,7 @@ impl Interface {
 
     pub fn bind(&mut self, port: u16) -> io::Result<TcpListener> {
         use std::collections::hash_map::Entry;
-        let cm = self.ih.lock().unwrap();
+        let mut cm = self.ih.lock().unwrap();
 
         match cm.pending.entry(port) {
             Entry::Vacant(v) => v.insert(VecDeque::new()),
@@ -60,16 +60,19 @@ impl Interface {
 
         // TODO: something to start accepting SYN packets on `PORT`
         drop(cm);
-        Ok(TcpListener(port, self.ih.clone()))
+        Ok(TcpListener{port, h: self.ih.clone()})
     }
 }
 
-pub struct TcpStream(Quad, InterfaceHandle);
+pub struct TcpStream {
+    quad: Quad, 
+    ih: InterfaceHandle
+}
 
 impl Read for TcpStream {
     fn read(&mut self, buff: &mut [u8]) -> io::Result<usize> {
-        let cm = self.1.lock().unwrap();
-        let c = cm.connections.get_mut(&self.0).ok_or_else(|| {
+        let mut cm = self.ih.lock().unwrap();
+        let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "stram was terminated unexpectedly",
@@ -103,8 +106,8 @@ impl Read for TcpStream {
 
 impl Write for TcpStream {
     fn write(&mut self, buff: &[u8]) -> io::Result<usize> {
-        let cm = self.1.lock().unwrap();
-        let c = cm.connections.get_mut(&self.0).ok_or_else(|| {
+        let mut cm = self.ih.lock().unwrap();
+        let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "stram was terminated unexpectedly",
@@ -125,10 +128,23 @@ impl Write for TcpStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let (ack, rx) = mpsc::channel();
-        self.1.send(InterfaceRequest::Flush { quad: self.0, ack });
-        rx.recv().unwrap();
-        Ok(())
+        let mut cm = self.ih.lock().unwrap();
+        let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "stram was terminated unexpectedly",
+            )
+        })?;
+
+        if c.unacked.is_empty() {
+            return Ok(());
+        } else {
+            // TODO: block
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "too many bytes buffered",
+            ));
+        }
     }
 }
 
@@ -138,18 +154,21 @@ impl TcpStream {
     }
 }
 
-pub struct TcpListener(u16, InterfaceHandle);
+pub struct TcpListener {
+    port: u16, 
+    h: InterfaceHandle
+}
 
 impl TcpListener {
     pub fn accept(&mut self) -> io::Result<TcpStream> {
-        let cm = self.1.lock().unwrap();
+        let mut cm = self.h.lock().unwrap();
         if let Some(quad) = cm
             .pending
-            .get_mut(&self.0)
+            .get_mut(&self.port)
             .expect("port closed while liststener still active")
             .pop_front()
         {
-            return Ok(TcpStream(quad, self.1.clone()));
+            return Ok(TcpStream{quad, ih: self.h.clone()});
         } else {
             // TODO: block
             return Err(io::Error::new(
