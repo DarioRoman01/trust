@@ -26,7 +26,7 @@ pub struct Connection {
     ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
     pub incoming: VecDeque<u8>,
-    unacked: VecDeque<u8>,
+    pub unacked: VecDeque<u8>,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2 F4)

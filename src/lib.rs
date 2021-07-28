@@ -1,10 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::prelude::*;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 mod tcp;
+
+const SEND_QUEUE_SIZE: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 struct Quad {
@@ -101,16 +103,25 @@ impl Read for TcpStream {
 
 impl Write for TcpStream {
     fn write(&mut self, buff: &[u8]) -> io::Result<usize> {
-        let (ack, rx) = mpsc::channel();
-        self.1.send(InterfaceRequest::Write {
-            quad: self.0.clone(),
-            bytes: Vec::from(buff),
-            ack,
-        });
+        let cm = self.1.lock().unwrap();
+        let c = cm.connections.get_mut(&self.0).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "stram was terminated unexpectedly",
+            )
+        })?;
 
-        let n = rx.recv().unwrap();
-        assert!(n <= buff.len());
-        Ok(n)
+        if c.unacked.len() >= SEND_QUEUE_SIZE {
+            // TODO: block
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "too many bytes buffered",
+            ));
+        }
+
+        let nwrite = std::cmp::min(buff.len(), SEND_QUEUE_SIZE - c.unacked.len());
+        c.unacked.extend(&buff[..nwrite]);
+        Ok(nwrite)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -118,6 +129,12 @@ impl Write for TcpStream {
         self.1.send(InterfaceRequest::Flush { quad: self.0, ack });
         rx.recv().unwrap();
         Ok(())
+    }
+}
+
+impl TcpStream {
+    pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        unimplemented!()
     }
 }
 
