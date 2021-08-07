@@ -27,21 +27,32 @@ struct ConnectionManager {
     pending: HashMap<u16, VecDeque<Quad>>,
 }
 
+fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) {
+    let mut buf = [0u8; 1504];
+    loop {
+        let nbytes = nic.recv(&mut buf[..])?;
+
+        match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
+            Ok(tcph) => {
+                use std::collections::hash_map::Entry;
+                let datai = iph
+            },
+            Err(_) => todo!(),
+        }
+    }
+}
+
 impl Interface {
     pub fn new() -> io::Result<Self> {
         let nic = tun_tap::Iface::without_packet_info("tun0", tun_tap::Mode::Tun)?;
-        let cm: InterfaceHandle = Arc::default();
+        let ih: InterfaceHandle = Arc::default();
 
         let jh = {
-            let cm = cm.clone();
-            thread::spawn(move || {
-                let nic = nic;
-                let cm = cm;
-                let buf = [0u8; 1504];
-            })
+            let ih = ih.clone();
+            thread::spawn(move || packet_loop(nic, ih));
         };
 
-        Ok(Interface { ih: cm, jh })
+        Ok(Interface { ih, jh })
     }
 
     pub fn bind(&mut self, port: u16) -> io::Result<TcpListener> {
